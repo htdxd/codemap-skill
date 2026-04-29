@@ -13,19 +13,20 @@ All generated CODEMAP.md files and analysis.md files MUST be written in the same
 
 ## Two Operating Modes
 
-Ask the user **before** doing anything else:
+Use the `AskUserQuestion` tool to ask the user **before** doing anything else. Present all three questions in a single call:
 
-```
-Q1: Project mode?
-    A) Learning — read-only study, no code changes expected
-    B) Maintenance — active development, bugs/features/refactors
+**Question 1** (header: "Mode", single-select):
+- **Learning (Recommended)** — read-only study, no code changes expected
+- **Maintenance** — active development, bugs/features/refactors
 
-Q2: Enable parallel sub-agents for faster generation?
-    A) Yes → how many max? (default: 3)
-    B) No (single-agent serial generation)
+**Question 2** (header: "Sub-agents", single-select):
+- **Yes, max 3 (Recommended)** — parallel sub-agent generation with default limit of 3
+- **Yes, custom limit** — parallel sub-agent generation, user specifies max count
+- **No** — single-agent serial generation
 
-Q3: Additional ignore patterns beyond defaults? (optional, Enter to skip)
-```
+**Question 3** (header: "Ignore", single-select):
+- **Defaults only (Recommended)** — use built-in ignore list + .gitignore
+- **Add custom patterns** — user provides additional ignore patterns
 
 Mode affects:
 
@@ -319,7 +320,7 @@ This project contains `CODEMAP.md` index files in the root and each source subdi
 3. **Prefer index over direct reads**: Consult CODEMAP.md first to locate the right files before reading source code. Exception: when the user provides an exact file path, read it directly.
 4. **Batch parallel reads**: After identifying all target files through CODEMAP navigation, read them all in one parallel batch — not one by one.
 5. **Key Exports shortcut**: When searching for a specific symbol (class, function, constant), scan the "Key Exports" table in each CODEMAP to locate which directory and file owns it, along with the exact line number.
-6. **Large file navigation**: When a file has a companion `<filename>.analysis.md`, read the analysis file first to identify the relevant line range, then read only that range from the source file using offset/limit parameters.
+6. **Large file handling**: After compiling the target file list, check if any files have a `→ see <filename>.analysis.md` pointer in the CODEMAP Files table. If so, read those analysis files first to determine relevant line ranges, then read only those ranges (via offset/limit) alongside the other regular files in a single parallel batch.
 ```
 
 For **maintenance mode**, additionally append:
@@ -349,12 +350,19 @@ Step 2: Read those subdirectories' CODEMAP.md files IN PARALLEL
         → If deeper subdirectories exist, repeat this step one level down.
 
 Step 3: Compile the final list of target source files.
-        → For any target file that has a companion .analysis.md,
-          read the analysis file first to identify the relevant line range.
 
-Step 4: Read ALL target source files IN ONE PARALLEL BATCH.
-        → For files with analysis data, use offset/limit to read
+Step 4: Check if any target files have a companion .analysis.md
+        (indicated by "→ see <filename>.analysis.md" in the CODEMAP Files table).
+        → If yes: read ALL .analysis.md files for those large files IN PARALLEL.
+        → From each analysis file, identify the relevant line range(s)
+          for the current task using the Logical Sections table.
+        → Determine offset/limit parameters for each large file.
+        → If no large files in the target list: skip directly to Step 5.
+
+Step 5: Read ALL target source files IN ONE PARALLEL BATCH.
+        → For large files: use the offset/limit from Step 4 to read
           only the relevant sections instead of the full file.
+        → For regular files: read in full.
         → This is the only step where actual source code is read.
 ```
 
