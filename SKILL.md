@@ -1,629 +1,311 @@
 ---
 name: codemap
-description: Generate and navigate CODEMAP.md index files for large codebases. Creates hierarchical per-directory CODEMAP.md files containing simplified directory structure, file/subdirectory function summaries, domain annotations, task-to-file routing, file-level dependency tables, and directory-level key exports with source location annotations. Use this skill whenever the user wants to index a codebase for efficient agent navigation, generate CODEMAP files, or when the user mentions "codemap", "code map", "codebase index", "project index", "codebase navigation", "generate navigation", or wants to understand a large project structure. Also triggers when the user asks to update or refresh existing CODEMAP files. Even if the user just says "index this project" or "map this codebase", use this skill.
+description: Use when indexing a codebase for agent navigation, generating or refreshing CODEMAP.md files, mapping large project structure, or adding CODEMAP guidance for learning/maintenance workflows.
 ---
 
 # CODEMAP — Codebase Navigation Index Generator
 
-Generate hierarchical `CODEMAP.md` files that serve as a structured navigation index for large codebases. Each directory gets its own CODEMAP.md containing a simplified directory tree, domain-annotated file/subdirectory summaries, task-to-file routing guides, file-level dependency tables, and directory-level key exports with source location annotations. For extra-large source files (>1000 lines), generate a companion deep-analysis file with feature-to-code index. Agent navigation follows a layered lazy-loading strategy: Task Guide first → Domain filter → drill down → batch-read only the source files actually needed.
+Generate hierarchical `CODEMAP.md` files that help agents locate relevant code without scanning unrelated files. Core navigation: **Task Guide first → Domain filter → targeted reads**. For files over 1000 lines, generate a companion `<filename>.analysis.md` with intent-to-line-range mapping.
+
+## Core Principles
+
+- `CODEMAP.md` is a navigation constraint, not documentation to browse.
+- Prefer positive guidance (Task Guide, Domain, Key Exports) over broad listings.
+- Dependencies are a safety net, not an invitation to chain-read.
+- Each CODEMAP describes only its own directory level. Child directory details belong in child CODEMAPs.
 
 ## Language Rule
 
-All generated CODEMAP.md files and analysis.md files MUST be written in the same language as the user's request. If the user asks in Chinese, all summaries, purpose descriptions, function descriptions, and section headings (except code identifiers and file names) are written in Chinese. If the user asks in English, write in English. Code identifiers (`ClassName`, `function_name`, file paths) always retain their original form regardless of language.
+Generated files use the user's request language for prose/headings. Code identifiers, file names, paths, and symbols keep original spelling.
 
-## Two Operating Modes
+## Before Generation: Ask Three Questions
 
-Use the `AskUserQuestion` tool to ask the user **before** doing anything else. Present all three questions in a single call:
+Unless already specified:
 
-**Question 1** (header: "Mode", single-select):
-- **Learning (Recommended)** — read-only study, no code changes expected
-- **Maintenance** — active development, bugs/features/refactors
+1. **Mode**: `Learning` (read-only study) or `Maintenance` (active development).
+2. **Sub-agents**: `Yes, max 3` (recommended), custom limit, or `No`.
+3. **Ignore rules**: `Defaults + .gitignore` (recommended), or add custom patterns.
 
-**Question 2** (header: "Sub-agents", single-select):
-- **Yes, max 3 (Recommended)** — parallel sub-agent generation with default limit of 3
-- **Yes, custom limit** — parallel sub-agent generation, user specifies max count
-- **No** — single-agent serial generation
-
-**Question 3** (header: "Ignore", single-select):
-- **Defaults only (Recommended)** — use built-in ignore list + .gitignore
-- **Add custom patterns** — user provides additional ignore patterns
-
-Mode affects:
+Mode differences:
 
 | Aspect | Learning | Maintenance |
 |---|---|---|
-| CODEMAP frontmatter | `mode: learning` | `mode: maintenance`, includes `commit: <hash>` |
-| Update strategy | One-time generation, no updates | Incremental via `git diff`, regenerate changed dirs only |
-| Content tone | May include brief design-intent notes | Concise, purely navigational |
-| AGENTS.md clause | Declares CODEMAP existence + relaxed navigation rules (Domain as guidance, deps as reference, anti-speculation) | Additionally declares: strict constraint rules (Task Guide First, dependency gating, Two-Stage Read Protocol) + full update rules with decision tree |
+| Frontmatter | `mode: learning` | `mode: maintenance`, `commit: <hash>` |
+| Task Guide | suggested entry point | primary navigation, strict |
+| Domain | soft focus hint | hard filter unless justified |
+| Dependencies | reference material | gated by interface/impact rules |
+| Updates | one-time | incremental after code changes |
 
-## Ignore Rules (Three Layers)
+## Ignore Rules
 
-Apply in order, merge results:
+Merge in order:
+1. Built-ins: `.git/`, dependency dirs, virtualenvs, build outputs, caches, logs, lockfiles, minified files, binaries, image/font assets, IDE folders.
+2. Project `.gitignore`.
+3. User custom patterns.
 
-**Layer 1 — Built-in defaults:**
-```
-node_modules/, .git/, dist/, build/, out/, target/,
-__pycache__/, .venv/, venv/, env/, .env, .egg-info/,
-*.pyc, *.pyo, *.min.js, *.min.css, *.map,
-*.lock, package-lock.json, yarn.lock, pnpm-lock.yaml,
-.DS_Store, Thumbs.db, *.log,
-.idea/, .vscode/, .vs/, *.swp, *.swo,
-coverage/, .nyc_output/, .pytest_cache/, .mypy_cache/,
-*.so, *.dylib, *.dll, *.o, *.obj, *.exe,
-*.png, *.jpg, *.jpeg, *.gif, *.ico, *.svg, *.bmp,
-*.woff, *.woff2, *.ttf, *.eot
-```
-
-**Layer 2 — Project `.gitignore`:** If exists, read and merge patterns.
-
-**Layer 3 — User custom:** From Q3 above.
+Include generated code only if it affects navigation; mark `Generated, do not edit manually`.
 
 ## Generation Workflow
 
-### Phase 0: Global Context
+### 1. Build Global Context
 
-1. Read `README.md` (or `README.rst`, `README.txt`) at project root.
-   - If no README, fall back to `package.json` / `pyproject.toml` / `Cargo.toml` / `go.mod` / `pom.xml` description fields + root file list.
-   - If none of the above exist, synthesize from root file list + first-level subdirectory names. Reasonable functional guesses are acceptable when information is scarce, but always note "based on structure inference, subject to code verification" for any guessed content.
-2. Combine with the filtered directory topology from Phase 1 to produce a **project global context summary**. Keep it concise — summarize what the project does, its high-level architecture, and major functional domains. Do not pad with installation instructions, badges, or changelogs.
+Read lightweight project context only:
+- Prefer root `README.md` / `README.rst` / `README.txt`.
+- Else metadata: `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `pom.xml`, etc.
+- Else infer from structure; mark guesses `inferred, verify against code`.
 
-### Phase 1: Scan, Filter, and Measure
+Produce: purpose, architecture shape, major domains. Omit badges/changelogs.
 
-1. Run `Glob` + `ls` on the project root, applying all three ignore layers.
-2. Produce a filtered directory topology: for each first-level subdirectory, collect its source files recursively.
-3. Identify root-level loose files (files not inside any subdirectory).
-4. **Collect metrics** for sub-agent dispatch (run these commands after filtering):
-   - **Per first-level subdirectory**: total file count, total code line count (`wc -l` or equivalent on all source files), total size on disk (`du -sh` or equivalent).
-   - **Project total**: sum of the above.
-   - These metrics determine sub-agent count and load balancing (see Phase 2).
-5. **Identify large files**: Flag any source file exceeding **1000 lines**.
-   - If the count of large files is **≤ 5**: generate deep-analysis companion files for all of them automatically.
-   - If the count is **> 5**: present the list of large files (with line counts) to the user and ask:
-     ```
-     Found N files exceeding 1000 lines. Generate deep-analysis files for:
-       A) All of them
-       B) Only the top 5 largest
-       C) Let me pick which ones
-       D) None — skip deep analysis
-     ```
-   - See "Large File Deep Analysis" section for the companion file format.
+### 2. Scan and Measure
 
-### Phase 2: Sub-agent Dispatch (if enabled)
+After applying ignore rules:
+- Build filtered directory topology.
+- Count source files, lines, size per first-level subdirectory and project total.
+- Files over 1000 lines:
+  - `<=5` → generate all `.analysis.md`.
+  - `>5` → ask: all, top 5, selected, or none.
 
-**Determine actual sub-agent count K:**
+### 3. Dispatch Work
 
-Let L = total code line count after filtering, S = total size on disk, N = user-specified max sub-agents.
+If sub-agents enabled, choose count `K`:
 
-| Condition | K |
+| Project size | K |
 |---|---|
-| L <= 3,000 lines OR S <= 500 KB | 1 (not worth splitting) |
-| 3,000 < L <= 15,000 OR 500 KB < S <= 3 MB | min(N, 2) |
-| L > 15,000 OR S > 3 MB | N |
+| `<=3000` lines or `<=500KB` | 1 |
+| `3001-15000` lines or `500KB-3MB` | `min(N, 2)` |
+| `>15000` lines or `>3MB` | `N` |
 
-When line count and size suggest different K values, use the larger K.
+If line count and size disagree, use the larger `K`. Assign first-level directories by greedy bin packing. Keep root loose files with main agent if small (`<=200` lines), else assign to lightest bin.
 
-**Load balancing — Greedy Bin Packing by code line count:**
+Sub-agent prompts: self-contained, plain English. Include compressed global context, output language, ignore rules, assigned directories, large files list, required formats, forbidden paths. No overlapping write ownership.
 
-1. Sort first-level subdirectories by code line count descending.
-2. Maintain K bins (one per sub-agent), each tracking total line count.
-3. For each directory: assign to the bin with the smallest current total.
-4. Root-level loose files: assign to the lightest bin, or handle by the main agent if total lines <= 200.
+### 4. Generate Per-Directory Maps
 
-The goal is to equalize **code line count** across sub-agents (not file count), since line count correlates more closely with actual reading and analysis effort.
+One `CODEMAP.md` per source directory (root + each subdirectory). Each map describes only the current directory level.
 
-**Each sub-agent receives:**
-- Project global context summary (compressed, from Phase 0)
-- Ignore rules
-- Output language (matching the user's request language)
-- List of directories assigned to it (with paths)
-- List of large files (>1000 lines) within its assigned directories that the user confirmed for deep analysis (from Phase 1 Step 5 selection)
-- Instruction: for each assigned directory and all its subdirectories, read source files and generate CODEMAP.md files following the format spec below. Additionally:
-  - Analyze each file's imports to populate the **Domain** column, **Cross-Dir Dependencies** column, and **File Dependencies** table.
-  - Identify functional domains within the directory and create the **Task Guide** table mapping task types to target files.
-  - For `.analysis.md` files, generate the **Feature Index** mapping development intents to line ranges.
+### 5. Assemble Root and Install Protocol
 
-**Each sub-agent produces:**
-- One CODEMAP.md per directory it is responsible for
-- One `<filename>.analysis.md` per large file (>1000 lines) in its scope
+Read first-level CODEMAP summaries and Task Guides. Write root `CODEMAP.md`, then install the Navigation Protocol block into `AGENTS.md` (preferred) or `CLAUDE.md`. Replace existing block if present; do not append duplicates. If neither file exists, create `AGENTS.md`.
 
-### Phase 2 (alternative): Serial Generation (if sub-agents disabled)
+---
 
-Main agent processes first-level subdirectories one by one in descending line-count order. For each directory: read all source files within it, generate CODEMAP.md for it and all its subdirectories. Generate deep-analysis files for any source file exceeding 1000 lines. All new fields (Domain, Cross-Dir Dependencies, File Dependencies, Task Guide, Feature Index) must be populated.
+## CODEMAP.md Structure
 
-### Phase 3: Root Assembly
+### Frontmatter
 
-1. Main agent reads the CODEMAP.md of each first-level subdirectory (summary line + Task Guide + Dependencies sections, not full content).
-2. Generate root-level CODEMAP.md: global context summary + simplified directory tree + subdirectory table (with Domain) + root file table (with Domain) + directory-level Dependencies (with internal/external marking) + root Task Guide (synthesized from subdirectory Task Guides) + directory-level key exports with source annotations.
-3. Update `CLAUDE.md` or `AGENTS.md` (create if absent) with the CODEMAP declaration clause.
-
-## CODEMAP.md Format Specification
-
-### Root-Level CODEMAP.md
-
-```markdown
+```yaml
 ---
 mode: learning | maintenance
-commit: abc1234f          # maintenance mode only
-ignore: node_modules/, dist/, __pycache__/, ...
-generated_at: 2026-04-28
-stats:
+commit: abc1234f        # maintenance only
+ignore: ...             # root only
+generated_at: YYYY-MM-DD
+stats:                  # root only
   total_files: 114
   total_lines: 18200
   total_size: 4.2 MB
 ---
-
-# CODEMAP — <project-name>/
-
-> <Project global context summary: what it does, architecture overview, major functional domains. Concise, based on README + directory structure. Any inferred content marked as "inferred, verify against code.">
-
-## Directory Structure
-
-\```
-src/
-  models/
-  data/
-  utils/
-configs/
-scripts/
-tests/
-\```
-
-## Key Exports
-
-| Symbol | Source | Line |
-|---|---|---|
-| `main()` | `main.py` | L:15 |
-| `App` | `src/app.py` | L:8 |
-| `create_server()` | `src/server.py` | L:42 |
-| `Config` | `configs/base.py` | L:12 |
-
-## Subdirectories
-
-| Directory | Domain | Purpose |
-|---|---|---|
-| `src/` | Core | Core source code: models, data processing, utilities |
-| `configs/` | Configuration | Configuration files for training, deployment, and environments |
-| `tests/` | Testing | Test suites: unit, integration, e2e |
-
-## Dependencies
-
-Internal = directories under this CODEMAP's scope. External = directories outside this scope.
-
-| Directory | Depends On | Depended By |
-|---|---|---|
-| `src/models/` | `src/data/` (internal), `configs/` (external) | `src/training/` (internal), `src/inference/` (internal) |
-| `src/data/` | `configs/` (external) | `src/models/` (internal), `tests/` (external) |
-| `src/utils/` | — | all other modules |
-| `configs/` | — | `src/models/` (external), `src/data/` (external) |
-| `tests/` | `src/` (external) | — |
-
-## Task Guide
-
-Maps common development task types to the directories and files most likely involved. Also Check lists cross-directory files that are empirically relevant to this task type.
-
-**Mode difference**: In Learning mode, Task Guide rows describe "understanding X" intents (e.g., "理解认证流程" → `src/auth/`). In Maintenance mode, they describe "modifying X" intents (e.g., "新增/修改认证方式" → `src/auth/`). Both modes share the same table structure; only the Task Type descriptions differ.
-
-| Task Type | Domain | Target Subdirs / Files | Also Check |
-|---|---|---|---|
-| 新增/修改认证方式 | Auth | `src/auth/` | `configs/auth.yaml` |
-| Token 黑名单/过期逻辑 | Auth | `src/auth/token_store.py`, `src/auth/jwt.py` | — |
-| 用户数据模型字段变更 | User Data | `src/models/user.py`, `src/schemas/user.py` | `migrations/` |
-| 新增 API 端点 | API | `src/routes/`, `src/services/` | `src/middleware/auth.py` |
-| 配置项新增/变更 | Configuration | `configs/` | `src/utils/config_loader.py` |
-
-## Files
-
-| File | Domain | Function |
-|---|---|---|
-| `main.py` | Entry Point | Application entry point, CLI argument parsing |
-| `setup.py` | Build | Package build and installation configuration |
-| `Makefile` | Build | Common development task shortcuts (lint, test, build) |
 ```
 
-### Subdirectory-Level CODEMAP.md
+### Sections
+
+Sections appear in this fixed order. Omit a section when it would be empty.
+
+| Section | Root | Mid-level | Leaf | Container |
+|---|---|---|---|---|
+| Summary | 1 sentence | 1 sentence | 1 sentence | 1 sentence |
+| Task Guide | yes | yes | yes | yes |
+| Subdirectories | yes | yes | — | yes |
+| Key Exports | yes | yes | if needed | — |
+| Files | yes | yes | yes | — |
+| File Dependencies | — | immediate files only | yes | — |
+
+**Container directory** = directory with no source files, only subdirectories. Generate only Summary + Task Guide + Subdirectories.
+
+### Summary
+
+One sentence. Mark uncertain inference with `(inferred)`.
+
+### Task Guide
+
+Columns: `Task | Domain | Target | Also Check`.
+
+Rules:
+- Each row is a concrete scenario, not a vague category.
+- Learning mode: understanding intents (`理解认证流程`). Maintenance mode: modification intents (`新增认证方式`).
+- `Domain` must match values used in the same map's Files or Subdirectories tables.
+- `Target` = primary read set. `Also Check` = conditional candidate, not automatic read list. Keep short and empirical.
+- Ensure every functional subdirectory and every common modification scenario has at least one row.
+
+Task Guide interpretation by mode:
+
+- **Maintenance**: Read `Target` first. Read `Also Check` only when the task explicitly mentions it, target code proves it needed, or public contract impact requires it. If no row matches, filter by `Domain`; non-matching domains excluded unless justified.
+- **Learning**: Use `Target` as starting point. Treat `Also Check` as optional reference.
+
+### Subdirectories
+
+Columns: `Dir | Domain | Depends On | Purpose`.
+
+Rules:
+- `Domain`: short functional area (e.g., `Auth`, `Prompt`, `Tool System`, `MCP`, `Runtime`).
+- **Domain granularity**: each functionally distinct subdirectory MUST have a unique Domain value. Never assign a single generic Domain (e.g., `LLM Integration`) to all entries.
+- `Depends On`: directory-level dependencies (internal and external). Use `—` if none.
+- `Purpose`: one sentence.
+
+### Key Exports
+
+Columns: `Symbol | Source | Line`.
+
+Rules:
+- Only symbols used by **other directories**. Internal-only symbols belong in child CODEMAPs.
+- Line numbers as `L:<number>`. Sort by architectural importance.
+- Cap at ~15 entries. Child CODEMAPs handle detailed symbols.
+
+### Files
+
+Columns vary by directory type:
+
+- **Root**: `File | Domain | Function`
+- **Mid-level / Leaf**: `File | Domain | Deps | Function`
+
+`Deps` column (compact notation):
+- `←` = files outside this directory that this file imports.
+- `→` = files outside this directory that depend on this file.
+- Example: `← core/errors.py | → main.py, chat/service.py`
+- `→` >5 files: `→ N files (foundational); rg "SymbolName" --type py -l`
+- Omit `Deps` column entirely when no file in the directory has cross-dir dependencies. Use `—` for individual files with no deps.
+
+Rules:
+- One row per immediate file. **Never list files from child directories that have their own CODEMAP.**
+- `Domain` must match local Task Guide / Subdirectories values. `—` for trivial re-export files.
+- `Function`: one concise sentence. For large files, append `→ see <filename>.analysis.md`.
+- Skip pure re-export `__init__.py` if exports are captured in Key Exports.
+
+### File Dependencies
+
+Columns: `File | Imports (in-dir) | Exposed To (in-dir)`.
+
+Rules:
+- Same-directory relationships only. Only for immediate files (not child directory files).
+- Mid-level directories: list only files directly in the directory itself, never files in child subdirectories.
+- Maintenance mode: read `Imports` only when an imported interface contract is unclear. Read `Exposed To` only when changing a public signature, return type, or documented semantics.
+- Learning mode: reference only; do not chain-read unless current logic is unclear without it.
+
+### Parent-Child Decoupling
+
+When a child directory has its own CODEMAP:
+- Parent does NOT list the child's internal files in Files, File Dependencies, or Key Exports.
+- Parent only references the child directory in Subdirectories and Task Guide.
+- Child-internal symbols appear only in the child's Key Exports.
+
+---
+
+## Large File Analysis (.analysis.md)
+
+For source files over 1000 lines, create `<filename>.analysis.md` beside it.
+
+### Structure
 
 ```markdown
 ---
-mode: learning | maintenance
-commit: abc1234f          # maintenance mode only
+source: filename.py
+lines: 1842
+generated_at: YYYY-MM-DD
 ---
 
-# CODEMAP — src/models/
-
-> <One-paragraph summary of this directory's role in the project, 2-4 sentences. Reference the project global context to explain the role.>
-
-## Directory Structure
-
-\```
-backbones/
-heads/
-\```
-
-## Key Exports
-
-| Symbol | Source | Line |
-|---|---|---|
-| `BaseModel` | `base_model.py` | L:23 |
-| `build_model()` | `registry.py` | L:56 |
-| `MODEL_REGISTRY` | `registry.py` | L:10 |
-| `FocalLoss` | `losses.py` | L:18 |
-| `DiceLoss` | `losses.py` | L:87 |
-
-## Subdirectories
-
-| Directory | Domain | Purpose |
-|---|---|---|
-| `backbones/` | Model Architecture | Backbone network implementations (ResNet, ViT, etc.) |
-| `heads/` | Model Architecture | Task-specific heads (classification, detection, segmentation) |
-
-## Dependencies
-
-Internal = directories under this CODEMAP's scope. External = directories outside this scope.
-
-| Directory | Depends On | Depended By |
-|---|---|---|
-| `backbones/` | `heads/` (internal) | — |
-| `heads/` | — | `backbones/` (internal) |
-
-## Task Guide
-
-Task Guide intent types differ by mode. Learning mode uses understanding intents; Maintenance mode uses modification intents. Both share the same table structure.
-
-| Task Type | Domain | Target Files | Also Check |
-|---|---|---|---|
-| Backbone 架构变更 | Model Architecture | `backbones/`, `base_model.py` | `configs/model/` |
-| 新增 Loss 函数 | Training | `losses.py` | `configs/training.yaml` |
-| 模型注册/工厂变更 | Model Registry | `registry.py` | `src/training/trainer.py` |
-
-## File Dependencies (within this directory)
-
-**Mode**: In Maintenance mode, Imports trigger reads only when interface contracts need understanding; Exposed To triggers reads only when public signature/semantics change. In Learning mode, both columns are reference material — consult when the current file's logic is unclear, skip when not needed.
-
-| File | Imports (in-dir) | Exposed To (in-dir) |
-|---|---|---|
-| `base_model.py` | — | `user_model.py`, `order_model.py` |
-| `user_model.py` | `base_model.py` | `user_repo.py`, `user_service.py` |
-| `registry.py` | `base_model.py`, `backbones/`, `heads/` | `src/training/` (external) |
-| `losses.py` | — | — |
-
-## Files
-
-Cross-Dir Dependencies: **Imports** = files this file depends on outside this directory. **Exposed To** = files outside this directory that depend on this file. If Exposed To exceeds 5 files, replace the list with a grep command and mark as "foundational."
-
-**Mode difference**: In Learning mode, both columns are reference material — no hard gating, but prefer completing your initial target read set before expanding to dependency files. In Maintenance mode, Imports trigger reads only when interface contracts need understanding; Exposed To ≤5 triggers reads only on public signature/semantics change; Exposed To >5 uses grep + Domain filter first.
-
-| File | Domain | Cross-Dir Dependencies | Function |
-|---|---|---|---|
-| `base_model.py` | Model Architecture | **Imports:** `configs/db.yaml`<br>**Exposed To:** 17 files — foundational. `grep -r "from.*base_model import\|import.*base_model" src/` to list dependents when needed. | Abstract base class for all models, defines forward pass and weight loading interfaces |
-| `registry.py` | Model Registry | **Imports:** `configs/model_registry.yaml`<br>**Exposed To:** `src/training/trainer.py`, `src/inference/predictor.py` | Model registry, instantiates models by name string |
-| `losses.py` | Training | **Imports:** —<br>**Exposed To:** `src/training/trainer.py` | Loss function collection (Focal, Dice, etc.) |
-| `__init__.py` | — | — | Module public interface |
-```
-
-### Format Rules
-
-1. **Directory Structure section**: Show only directory names (no files), depth limited to 2 levels below current directory. Purpose: give the agent a quick spatial overview.
-2. **Key Exports section**: A table listing directory-level aggregate symbols — classes, functions, constants that callers from other directories would use. Each entry includes the **source file path** (relative to current directory) and **line number** (`L:<number>`). Sort by importance descending: most architecturally significant symbols first. This is a directory-level view — do NOT create per-file export lists.
-3. **Subdirectories table**: One row per immediate subdirectory. Domain column: functional domain this subdirectory belongs to (e.g., Auth, Model Architecture, Data Access). Purpose column: one sentence, 10-25 words.
-4. **Dependencies section** (root-level and mid-level CODEMAPs only): A table listing inter-directory dependency relationships. Each row shows what a directory depends on and what depends on it. Mark each entry as `(internal)` if the referenced directory is within this CODEMAP's scope, or `(external)` if outside. External dependencies stop at the directory level — do not expand to file-level chains. This helps agents trace the impact direction of a modification. Omit for leaf directories.
-5. **Task Guide section** (all CODEMAPs): A table mapping common task types to their most likely target files or subdirectories. Each row represents a concrete task scenario. Columns:
-   - **Task Type**: Concrete task description. **Learning mode**: understanding intents (e.g., "理解认证流程", "了解模型注册机制"). **Maintenance mode**: modification intents (e.g., "新增认证方式", "修改 Token 过期逻辑").
-   - **Domain**: The functional domain this task belongs to (must match Domain values used in Files/Subdirectories tables).
-   - **Target Files / Target Subdirs**: The file(s) or subdirectory(ies) directly involved in this task type. Use project-relative paths for cross-directory targets.
-   - **Also Check**: Cross-directory files empirically relevant to this task type. These are NOT exhaustive dependency listings — only files that experience shows are commonly needed. Use project-relative paths.
-   - In Maintenance mode, the Task Guide is the **primary navigation source**: when a task matches a Task Type row, the Target + Also Check columns define the initial read set. In Learning mode, the Task Guide is a **recommended entry point** — agents should consult it first but may freely explore beyond it.
-6. **File Dependencies section** (subdirectory CODEMAPs only): A table listing import relationships between files **within this directory only**. Cross-directory relationships go in the Files table's Cross-Dir Dependencies column. Columns:
-   - **File**: The source file name (relative to this directory).
-   - **Imports (in-dir)**: Files within this same directory that this file imports.
-   - **Exposed To (in-dir)**: Files within this same directory that import this file's public symbols.
-   - **Learning mode**: Both columns are reference material — consult dependency files when the current file's logic is unclear without them, skip when not needed. Prefer completing the initial target file set before expanding.
-   - **Maintenance mode**: The Exposed To column triggers additional reads ONLY when the modification changes a public symbol's signature, return type, or documented semantics — not for internal implementation changes.
-7. **Files table**: One row per file in the current directory (not recursive). Columns:
-   - **File**: File name.
-   - **Domain**: Functional domain this file belongs to. Must be one of the Domain values used in Task Guide and Subdirectories tables. Files that serve multiple domains may list the primary one. For `__init__.py` and other pure re-export files, use `—`.
-   - **Cross-Dir Dependencies** (subdirectory level only; omit for root-level CODEMAPs): **Imports** lists files outside this directory that this file depends on. **Exposed To** lists files outside this directory that depend on this file. When Exposed To has ≤5 entries, list exact file paths. When >5 entries, write the count followed by "— foundational." and a grep command to dynamically list dependents (e.g., `grep -r "from.*base_model import\|import.*base_model" src/`). Use project-relative paths for all entries. If neither Imports nor Exposed To has content, use `—`.
-   - **Learning mode**: Cross-Dir Dependencies are reference material — no hard gating. Prefer completing your initial target read set before expanding to dependency files. When curious about a dependency, read it; otherwise skip.
-   - **Maintenance mode**: Imports trigger reads only when interface contract understanding is needed. Exposed To ≤5 triggers reads only on public signature/semantics change. Exposed To >5 uses grep + Domain filter first.
-   - **Function**: One sentence, 10-30 words describing the file's purpose. For large files (>1000 lines), append `→ see <filename>.analysis.md`.
-   - Skip `__init__.py` if it only re-exports (mention in Key Exports instead).
-8. **Summary paragraph** (below the heading): describe this directory's responsibility within the project. Reference the project global context to explain the role. 2-4 sentences. When information is insufficient for certainty, state a reasonable inference and mark it: "inferred, verify against code."
-9. **Leaf directories** (no subdirectories): omit the "Directory Structure" and "Subdirectories" sections. The "Dependencies" section is also omitted (no subdirectories to relate). Keep File Dependencies, Task Guide, Files, and Key Exports.
-10. **Domain consistency**: Domain values used in Subdirectories, Files, and Task Guide tables within the same CODEMAP must match exactly (case-sensitive). Use short, descriptive names: e.g., `Auth`, `User Data`, `Model Architecture`, `Training`, `API`, `Configuration`, `Data Access`, `Observability`.
-
-## Large File Deep Analysis
-
-For any source file exceeding **1000 lines**, generate a companion file named `<filename>.analysis.md` in the same directory as the source file. This file provides a structural map so agents can navigate the large file without reading it in full.
-
-### Format
-
-```markdown
----
-source: <filename>
-lines: 2847
-generated_at: 2026-04-28
----
-
-# Analysis — <filename>
-
-> <One-sentence summary of this file's overall purpose>
-
-## Top-Level Symbols
-
-| Symbol | Type | Line | Purpose |
-|---|---|---|---|
-| `TransformerEncoder` | class | L:45 | Main encoder class, manages multi-head attention layers and feed-forward blocks |
-| `MultiHeadAttention` | class | L:198 | Scaled dot-product attention with configurable heads |
-| `PositionalEncoding` | class | L:412 | Sinusoidal position embeddings for sequence inputs |
-| `build_encoder()` | function | L:680 | Factory function, builds encoder from config dict |
-| `DEFAULT_CONFIG` | constant | L:12 | Default hyperparameters for encoder construction |
-| `_compute_mask()` | function | L:720 | Internal: generates causal attention masks |
-
-## Class Hierarchy (if applicable)
-
-\```
-nn.Module
-  └── TransformerEncoder
-        ├── MultiHeadAttention
-        └── PositionalEncoding
-\```
+> One-sentence summary.
 
 ## Feature Index
 
-Maps development intents to the line ranges that need to be read. Each row targets a specific task scenario. Notes column flags cross-section dependencies within the same file to avoid missing related code.
-
-| Intent | Target Sections (line range) | Notes |
+| Intent | Lines | Notes |
 |---|---|---|
-| 新增注意力机制 | L:198-411 (`MultiHeadAttention`) | 继承 `AttentionBase`（L:45-80），需同步修改注册表 L:680-720 |
-| 修改损失计算 | L:520-680 | 独立区块，不依赖文件内其他符号 |
-| 调整编码器架构 | L:45-197, L:680-850 | 涉及类定义 + 工厂函数两处 |
-| 修改默认超参数 | L:1-44 | 仅常量区，自包含 |
-| 理解数据流入流出 | L:120-160 (`forward()`), L:680-720 (工厂函数) | 快速建立心智模型 |
+
+## Symbols
+
+| Symbol | Type | Line |
+|---|---|---|
 
 ## Logical Sections
 
-| Line Range | Content |
+| Lines | Content |
 |---|---|
-| 1-44 | Imports, constants, configuration defaults |
-| 45-197 | `TransformerEncoder` class definition |
-| 198-411 | `MultiHeadAttention` class definition |
-| 412-679 | `PositionalEncoding` + utility functions |
-| 680-850 | Factory functions and public API |
-| 851-end | Internal helpers and deprecated code |
 ```
 
 ### Rules
 
-1. **Top-Level Symbols table**: List all classes, standalone functions, and module-level constants/variables. Include both public and important private symbols (prefix `_`). Sort by line number ascending.
-2. **Type column**: `class`, `function`, `constant`, `variable`, `decorator`, `type alias`, etc.
-3. **Class Hierarchy**: Only include if the file defines inheritance relationships. Use a tree diagram. Omit if all classes are independent.
-4. **Feature Index**: Maps development intents (verb + object tasks like "新增注意力机制", "修改损失计算") to the specific line ranges that must be read. This is the primary navigation tool for agents working with this file — match the task to an Intent row, read the listed line ranges. Rules:
-   - Each Intent row describes a concrete task scenario, not a general feature category.
-   - Target Sections lists one or more line ranges, with the relevant symbol name in parentheses for clarity.
-   - Notes column flags cross-section dependencies (e.g., "需同步修改注册表 L:680-720") or notes that a section is self-contained.
-   - Multiple non-contiguous ranges are listed with commas (e.g., `L:45-197, L:680-850`).
-   - If no clear task-to-range mapping can be inferred for a file, the Feature Index may have fewer rows than Logical Sections. That is acceptable — Logical Sections serves as the fallback.
-5. **Logical Sections**: Divide the file into coherent blocks by line range. Purpose: fallback navigation when no Feature Index row matches the task, or when the agent needs to understand overall file structure.
-6. Keep the analysis file concise — it is a structural map, not documentation. No code snippets, no API signatures, no implementation details.
+- **Feature Index** is primary. Map concrete learning or development intents to exact line ranges. Notes: same-file coupling only. If no intent maps to a section, omit that row.
+- **Symbols**: top-level public symbols only (classes, functions, constants). Not internal helpers.
+- **Logical Sections**: high-level structural segments only, **5-10 rows max**. Provides structural overview and serves as fallback when Feature Index has no match. Do not expand to function-level granularity.
+- Optional **Class Hierarchy** only when inheritance depth >2.
+- No code snippets, API signatures, or implementation detail paragraphs.
+- In maintenance mode, agents read only matched line ranges from Feature Index; Logical Sections is the fallback.
 
-## CLAUDE.md / AGENTS.md Declaration
+---
 
-The content written to `CLAUDE.md` or `AGENTS.md` (create the file if neither exists; prefer `AGENTS.md`) depends on the project's operating mode. Both sets are **default navigation conventions** — the user may override or relax any rule if they have a specific workflow preference.
+## Navigation Protocol (Project-Level Injection)
 
-### For Learning Mode
+Install exactly one protocol block into project `AGENTS.md` or `CLAUDE.md`. Choose by mode.
 
-Append the following block. Learning mode rules are **relaxed guidance**: Domain and Task Guide are suggestions, dependencies are reference material, and the anti-speculation rule prevents excessive reading without hard gating.
+### Learning Mode Block
 
-```markdown
+````markdown
 ## CODEMAP Navigation Protocol
 
-This project contains `CODEMAP.md` index files in the root and each source subdirectory. Companion `<filename>.analysis.md` files provide structural maps for files exceeding 1000 lines.
+This project uses hierarchical `CODEMAP.md` index files for code navigation. Files over 1000 lines may have companion `.analysis.md` structural maps.
 
-### Reading Rules
+### Navigation Rules
 
-1. **Start from root `CODEMAP.md`** when exploring the codebase or searching for code related to a learning goal.
-2. **Layer-by-layer drill-down**: Read root CODEMAP → identify relevant subdirectories → read their CODEMAPs in parallel → identify target files → batch-read source files.
-3. **Domain-guided exploration**: Domain annotations in Files and Subdirectories tables describe each file's functional area. Use these to focus exploration on the relevant domain and deprioritize files in unrelated domains. This is a soft hint, not a hard filter.
-4. **Task Guide as entry point**: Task Guide rows suggest target files for understanding specific features. Treat them as recommended starting points. If your learning goal does not match any Task Type, fall back to Domain filtering.
-5. **Dependencies as reference**: File Dependencies (within-directory) and Cross-Dir Dependencies tables describe how files relate to each other. Consult dependency files when the current file's logic is unclear without seeing the dependency — otherwise skip. Prefer completing your initial target file set before expanding to dependency files.
-6. **Avoid speculative expansion**: After reading your initial target files, pause and assess whether you truly need more. Do not read files just because they "might be related" or "look interesting" — verify the need from already-read code before expanding the read set.
-7. **Batch parallel reads**: After identifying target files, read them all in one parallel batch — not one by one.
-8. **Key Exports shortcut**: Scan the "Key Exports" table to locate specific symbols with exact file paths and line numbers.
-9. **Feature Index shortcut**: For large files, match your learning intent against `.analysis.md` Feature Index rows to jump directly to relevant line ranges. Use Logical Sections as fallback.
-```
-```
+1. Start from root `CODEMAP.md`. Read Task Guide first.
+2. Task Guide match: Target = primary read set. Also Check = conditional candidates (decide after reading Target).
+3. No Task Guide match → filter Subdirectories by Domain, enter only matching-domain subdirectories.
+4. Drill down layer by layer; consult local Task Guide at each level before reading source files.
+5. Container directories (no source files): read only Task Guide + Subdirectories.
+6. Large files: read `.analysis.md` Feature Index first, match Intent to line ranges. Use Logical Sections as fallback.
+7. Batch-read final target files in parallel.
+8. No speculative expansion: extend read set only when already-read code proves the need.
+````
 
-### For Maintenance Mode
+### Maintenance Mode Block
 
-Append the following block. Maintenance mode rules are **strict constraints**: Task Guide is the primary navigation source, Domain is a hard filter, dependencies are gated, and a Two-Stage Read Protocol limits the read set.
-
-```markdown
+````markdown
 ## CODEMAP Navigation Protocol
 
-This project contains `CODEMAP.md` index files in the root and each source subdirectory. These files provide a structured navigation index for efficient codebase exploration. Companion `<filename>.analysis.md` files provide structural maps for files exceeding 1000 lines.
+This project uses hierarchical `CODEMAP.md` index files for code navigation. Files over 1000 lines may have companion `.analysis.md` structural maps. For development tasks, these rules are strict navigation constraints.
 
-### Reading Rules
+### Navigation Rules
 
-1. **Task Guide First**: Before any file reads, check the root CODEMAP's Task Guide table. If a Task Type row matches the current task, the Target + Also Check columns define the initial read set. This is the primary navigation path — skip domain guessing.
-2. **Domain-First Filtering**: If no Task Guide row matches, filter by Domain. Match the task to a Domain value, then read only the CODEMAPs and files whose Domain column matches. Files with non-matching Domains are excluded unless explicitly listed in a matched Task Guide's Also Check column.
-3. **Layer-by-layer drill-down**: Read root CODEMAP → identify relevant subdirectories (via Task Guide or Domain match) → read their CODEMAPs in parallel → identify target files → batch-read source files.
-4. **Task Guide precision at every level**: At each CODEMAP level, consult the local Task Guide before reading files. The Target Files column at that level defines the precise file set for that directory — do not expand beyond it unless first-pass analysis proves additional files are needed.
-5. **Cross-Dir Dependency discipline**:
-   - **Imports** entries list files the current file depends on. Read them only when the current file's logic cannot be understood without seeing the imported interface's contract (signature, return type, exception semantics).
-   - **Exposed To** entries (≤5 files) list files that depend on the current file. Read them only when the modification changes a public symbol's signature, return type, or documented behavior — not for internal implementation changes.
-   - **Exposed To** entries (>5 files, "foundational" with grep command): Run the provided grep command to identify dependents, then filter the results to those matching the current task's Domain. Read only those filtered files.
-6. **File Dependencies discipline** (within-directory Imports/Exposed To): Same rules as Cross-Dir Dependencies. Imports read only when interface contract understanding is needed. Exposed To read only when public signature/semantics change.
-7. **Two-Stage Read Protocol**:
-   - Stage 1: Read exactly the files identified by Task Guide (Target + Also Check) and Domain match. For large files, read `.analysis.md` Feature Index first, then targeted line ranges.
-   - Stage 2: Only if Stage 1 analysis reveals that additional files are needed, read them with explicit justification for each additional file. Never pre-emptively expand the read set "just in case."
-8. **Batch parallel reads**: After identifying all target files through CODEMAP navigation, read them all in one parallel batch — not one by one.
-9. **Key Exports shortcut**: When searching for a specific symbol (class, function, constant), scan the "Key Exports" table in each CODEMAP to locate which directory and file owns it, along with the exact line number.
-10. **Feature Index shortcut**: For large files, match the task intent against the `.analysis.md` Feature Index rows. Read only the line ranges listed in matching rows. Use Logical Sections as fallback when no Feature Index row matches.
+1. Start from root `CODEMAP.md`. Read Task Guide first.
+2. Task Guide match: Target = primary read set. Read Also Check only when the task explicitly involves it, target code proves the need, or public contract impact requires it.
+3. No Task Guide match → filter Subdirectories by Domain. Non-matching domains are excluded unless already-read code gives a concrete reason.
+4. Drill down layer by layer; consult local Task Guide at each level before reading source files.
+5. Container directories (no source files): read only Task Guide + Subdirectories.
+6. Large files: read `.analysis.md` Feature Index first, match Intent to line ranges. Use Logical Sections as fallback.
+7. Batch-read final target files in parallel.
+8. No speculative expansion: each additional file requires an explicit reason.
+
+### Dependency Gating
+
+The Deps column in Files tables marks cross-directory dependencies:
+- `←` (imports): read only when the imported interface contract is needed to understand the current file.
+- `→` (exposed to) ≤5 files: read only when changing a public signature, return type, or documented semantics.
+- `→` >5 files (foundational): run the search command provided in CODEMAP, filter by Domain, then read only justified matches.
+- No chaining: do not read dependencies-of-dependencies unless a specific contract gap remains.
 
 ### Update Rules
 
-After completing a code modification task, the agent autonomously assesses whether CODEMAP updates are needed. Use the following decision tree:
+After code changes, the agent autonomously evaluates:
+- File/directory add, delete, move, rename → regenerate affected directory CODEMAP, update parent Subdirectories and Task Guide paths.
+- Public symbol signature/return type change → update Key Exports and related Task Guide entries.
+- Internal implementation change only → no update. Exception: update `.analysis.md` when Feature Index mapping becomes invalid.
+````
 
-1. **Did the change add, delete, move, or rename any file or directory?** → **Structural change**. Regenerate the affected directory's CODEMAP.md (all sections: Files, Key Exports, File Dependencies, Cross-Dir Dependencies, Task Guide). Propagate upward: update parent CODEMAP Subdirectories and Dependencies tables. Create/delete/rename `.analysis.md` if large files were added/removed. Update `commit` field in all modified CODEMAPs.
-
-2. **Did the change modify a public symbol's declaration?** (class/function/constant added, removed, renamed; function signature parameters added/removed/renamed; return type changed) → **Interface change**. Update:
-   - Key Exports table in the affected directory's CODEMAP (add/remove/rename entries).
-   - Propagate to parent CODEMAP Key Exports if the symbol was listed there.
-   - Files table Cross-Dir Dependencies: update Imports if this file added/removed cross-directory imports. Update Exposed To in the imported file's directory CODEMAP if the dependency count crosses the 5-file threshold.
-   - Task Guide: update only if the signature change creates a new typical task pattern.
-   - `commit` field in all modified CODEMAPs.
-
-3. **Did the change only modify internal implementation?** (bug fix, internal refactor, algorithm tweak, parameter adjustment, comment changes) → **Implementation change**. No CODEMAP updates needed. Exception: update `.analysis.md` Logical Sections line ranges if code shifted by more than 20 lines within a >1000-line file. Feature Index line ranges: update only if the logical mapping between intents and code sections changed (not for mere line shifts — those are corrected at next full regeneration).
-
-4. **No updates for**: comment-only changes, test file changes (outside CODEMAP scope), config value changes that don't alter which files import the config.
-
-The agent decides autonomously after each task — no user intervention needed.
-```
-```
-
-## Navigation Workflow (for agents reading the codebase)
-
-This is how an agent should use CODEMAP.md files when performing any code reading or search task. The workflow differs by mode: Learning uses relaxed guidance, Maintenance uses strict constraints.
-
-### Learning Mode Workflow
-
-```
-Step 1: Read root CODEMAP.md
-        → Check Task Guide for matching understanding intent ("理解X").
-          Match → use Target files as suggested entry point.
-          No match → use Domain column to identify relevant directories.
-        → Key Exports: note if the target symbol is directly listed.
-
-Step 2: Read target subdirectories' CODEMAP.md files IN PARALLEL
-        → Task Guide + Domain column guide file selection (soft hints).
-        → File Dependencies & Cross-Dir Dependencies are reference material —
-          note them, but do not auto-expand the read set.
-
-Step 3: Compile target file list
-        → Target files from Task Guide/Domain match + any dependency files
-          that are clearly needed based on already-read code.
-        → Avoid speculative expansion — prefer completing this set first.
-
-Step 4: For large files, read .analysis.md → Feature Index → target line ranges.
-
-Step 5: Batch-read ALL target source files IN ONE PARALLEL BATCH.
-        → Pause after reading. Only expand to more files if the code you read
-          explicitly references a dependency you don't yet understand.
-```
-
-### Maintenance Mode Workflow
-
-```
-Step 1: Read root CODEMAP.md
-        → Check Task Guide first: does any Task Type row match the current task?
-          Yes → Target Subdirs / Files + Also Check define the initial read set.
-          No  → Match task to a Domain. Use Subdirectories + Files tables filtered
-                by that Domain to identify target directories and root-level files.
-        → If Key Exports directly shows the target symbol, note file + line.
-
-Step 2: Read target subdirectories' CODEMAP.md files IN PARALLEL
-        → Again, Task Guide first at each level — match Task Type to get precise
-          Target Files + Also Check.
-        → If no Task Guide match, filter Files table by Domain column.
-        → Consult File Dependencies table ONLY if:
-          - The task involves understanding an imported interface's contract →
-            read Imports files.
-          - The task changes a public symbol's signature/semantics →
-            read Exposed To files.
-          - Otherwise skip File Dependencies — do not chain-read.
-
-Step 3: Resolve cross-directory dependencies from the Files table
-        → Cross-Dir Dependencies column:
-          - Imports: read only when interface contract understanding is needed.
-          - Exposed To ≤5: read only when public signature/semantics change.
-          - Exposed To >5 (foundational): run the grep command → filter results
-            by current task's Domain → read only matching files.
-        → Task Guide Also Check: read all listed files — they are empirically
-          validated for this task type.
-
-Step 4: Compile the final list of target source files
-        → Union of: Task Guide Target + Also Check + Domain-matched files
-          + Exposed To (if public change) + Imports (if contract check needed).
-        → Remove duplicates. This is the complete read set.
-
-Step 5: For large files in the target list, read their .analysis.md IN PARALLEL
-        → Check Feature Index: match task intent → read listed line ranges.
-        → No Feature Index match → use Logical Sections to determine ranges.
-        → Regular files in the target list: read in full.
-
-Step 6: Batch-read ALL target source files IN ONE PARALLEL BATCH
-        → Large files: use offset/limit from Step 5.
-        → Regular files: read in full.
-        → This is the only step where actual source code is read.
-
-Step 7 (Stage 2, conditional): Only if Step 6 analysis proves additional files
-        are needed, read them with explicit justification for each file.
-        Never pre-emptively expand the read set beyond Step 4's result.
-```
-
-**Efficiency principle**: Reading 3-4 CODEMAPs (~200 lines) to precisely locate 5-8 source files is far cheaper than scanning the entire codebase. In Maintenance mode, the Task Guide + Domain filter narrows the candidate set before any source code is read, and File Dependencies/Cross-Dir Dependencies are safety nets — not reading mandates. In Learning mode, Domain and Task Guide provide soft guidance while the anti-speculation pause prevents unbounded exploration. For large files in both modes, the Feature Index further reduces token consumption by enabling targeted line-range reads.
-
-## Incremental Update (Maintenance Mode Only)
-
-After completing a code modification task, the agent autonomously assesses whether CODEMAP updates are needed:
-
-### Decision Tree
-
-```
-修改完成后：
-1. 是否增删移了文件/目录？        → 是 → 结构变更流程
-2. 是否变更了公开符号声明？        → 是 → 接口变更流程
-3. 是否仅内部实现/注释/配置值？    → 是 → 实现变更流程（几乎无更新）
-```
-
-### Change Type Classification
-
-#### 1. Structural Change (file/directory added, deleted, moved, renamed)
-
-| Update Item | Action |
-|---|---|
-| Affected directory's CODEMAP.md | **Regenerate**: Files table, Key Exports, File Dependencies, Cross-Dir Dependencies, Task Guide |
-| Parent CODEMAP.md | **Update**: Subdirectories table, Dependencies table |
-| Affected dependents' Exposed To | **Update**: file paths in Cross-Dir Dependencies Exposed To entries of directories whose files import the moved/renamed file |
-| Affected Task Guide entries | **Update**: file paths in Target Files and Also Check columns that reference moved/renamed files |
-| `.analysis.md` | **Create/delete/rename** if a large file (>1000 lines) was added, deleted, or renamed |
-| `commit` field | **Update** in all modified CODEMAPs |
-
-#### 2. Interface Change (public class/function/constant added, removed, renamed; signature params added/removed/renamed; return type changed)
-
-| Update Item | Action |
-|---|---|
-| Key Exports table (this dir) | **Update**: add/remove/rename symbol entries; update Line numbers |
-| Key Exports table (parent) | **Update**: if the symbol was listed in the parent's Key Exports |
-| Files table Cross-Dir Dependencies — Imports | **Update**: if this file added or removed cross-directory imports |
-| Affected file's Exposed To (in the imported file's directory CODEMAP) | **Update**: add the new dependent if ≤5 total; if count exceeds 5, replace list with grep command and mark "foundational" |
-| Task Guide tables | **Update**: only if the signature change enables a new typical task pattern or invalidates an existing one |
-| File Dependencies table | **No update** — unless this file added/removed imports of same-directory files |
-| `commit` field | **Update** in all modified CODEMAPs |
-
-#### 3. Implementation Change (bug fix, internal refactor, algorithm tweak, parameter adjustment)
-
-| Update Item | Action |
-|---|---|
-| All CODEMAP tables | **No update** — file purpose, exports, Domain, dependencies, and task mappings unchanged |
-| `.analysis.md` Logical Sections | **Update** line ranges only if code shifted by >20 lines within a >1000-line file |
-| `.analysis.md` Feature Index | **Update** only if the logical mapping between intents and code sections changed (not for mere line shifts) |
-| `commit` field | **No update** needed |
-
-#### 4. No Update Scenarios
-
-| Scenario | Reason |
-|---|---|
-| Comment-only changes | No impact on any index information |
-| Test file modifications (`tests/` directory) | Outside CODEMAP index scope |
-| Config value changes (not changing which files import the config) | Import relationships unchanged, Cross-Dir Dependencies unaffected |
+---
 
 ## Edge Cases
 
-- **Monorepo with multiple packages**: Treat each package root as a semi-independent project. Generate a CODEMAP.md per package root, plus a top-level CODEMAP.md that indexes packages.
-- **Very deep nesting (>5 levels)**: The drill-down navigation still works — each level adds one CODEMAP read. If a single directory has >200 files, split the file table into logical groups with subheadings.
-- **Generated code directories** (e.g., `proto/gen/`, `graphql/generated/`): Include in CODEMAP with Domain = "Generated" or the appropriate domain, and a note "auto-generated, do not edit manually" in the function column. Agent knows to skip these for modification tasks.
-- **No README and no project metadata files**: Synthesize the global context summary from the root directory's file list and first-level subdirectory names. Mark inferred content explicitly.
-- **Files near the 1000-line threshold**: Use 1000 lines as a hard threshold. Files at 900-999 lines do not get analysis files — the regular CODEMAP entry is sufficient for navigation.
-- **Cross-Dir Exposed To crossing the 5-file threshold**: When a previously ≤5 Exposed To grows to 6+, replace the static list with a grep command and mark "foundational." When a foundational file's dependents drop to ≤5 after refactoring, restore the static list.
-- **Task Guide coverage gaps**: Not every possible task needs a Task Guide row. If a directory has no clear task-to-file patterns (e.g., a `utils/` directory with miscellaneous helpers), the Task Guide may have few or zero rows. Domain filtering via the Files table remains the fallback.
+- **Monorepo**: map each package root plus a top-level package index.
+- **Deep nesting**: layer-by-layer drill-down; each level's map stays local.
+- **Huge flat directory** (`>200` files): group Files rows by Domain subheadings.
+- **Generated code**: include only when navigation needs it; mark `Generated, do not edit manually`.
+- **No metadata/README**: infer cautiously; mark uncertainty.
+- **Task Guide gaps**: acceptable. Fall back to Domain filtering and Key Exports.
+- **Foundational files** (>5 dependents): provide grep command, require Domain filtering.
